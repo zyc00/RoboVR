@@ -227,7 +227,7 @@ class OpenXrApp {
       return false;
     }
     glGenTextures(2, video_textures_.data());
-    if (!createVideoProgram() || !createExternalVideoProgram()) {
+    if (!createVideoProgram() || !createExternalVideoProgram() || !createWaitingProgram()) {
       return false;
     }
     if (!createCodecSurfaceResources(env)) {
@@ -691,22 +691,14 @@ class OpenXrApp {
     glBindFramebuffer(GL_FRAMEBUFFER, framebuffer_);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, swapchain.images[image_index].image, 0);
     glViewport(0, 0, swapchain.width, swapchain.height);
+    current_viewport_width_ = swapchain.width;
+    current_viewport_height_ = swapchain.height;
     if (uploadLatestVideoFrame(view_index)) {
       drawVideoTexture(video_textures_[view_index]);
     } else if (drawLatestCodecSurfaceFrame(view_index)) {
       // Drawn directly from MediaCodec's SurfaceTexture.
     } else {
-      StereoClearColors colors;
-      {
-        std::lock_guard<std::mutex> lock(g_video_mutex);
-        colors = g_stereo_colors;
-      }
-      if (view_index == 0) {
-        glClearColor(colors.left[0], colors.left[1], colors.left[2], colors.left[3]);
-      } else {
-        glClearColor(colors.right[0], colors.right[1], colors.right[2], colors.right[3]);
-      }
-      glClear(GL_COLOR_BUFFER_BIT);
+      drawWaitingOverlay();
     }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
@@ -804,6 +796,57 @@ void main() {
       return false;
     }
     external_video_texture_uniform_ = glGetUniformLocation(external_video_program_, "u_texture");
+    return true;
+  }
+
+  bool createWaitingProgram() {
+    const char* vertex_source = R"(#version 300 es
+precision mediump float;
+void main() {
+  vec2 positions[3] = vec2[3](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+  gl_Position = vec4(positions[gl_VertexID], 0.0, 1.0);
+})";
+    const char* fragment_source = R"(#version 300 es
+precision mediump float;
+uniform vec2 u_viewport;
+out vec4 out_color;
+void main() {
+  vec2 p = gl_FragCoord.xy;
+  vec2 uv = p / max(u_viewport, vec2(1.0));
+  vec2 d = abs(uv - vec2(0.5));
+  float border = step(uv.x, 0.04) + step(0.96, uv.x) + step(uv.y, 0.04) + step(0.96, uv.y);
+  float cross = step(d.x, 0.006) * step(d.y, 0.24) + step(d.y, 0.006) * step(d.x, 0.24);
+  float center = step(length(d), 0.035);
+  float ink = clamp(border + cross + center, 0.0, 1.0);
+  vec3 bg = vec3(0.015, 0.018, 0.022);
+  vec3 fg = vec3(0.50, 0.74, 0.95);
+  out_color = vec4(mix(bg, fg, ink), 1.0);
+})";
+
+    const GLuint vertex_shader = compileShader(GL_VERTEX_SHADER, vertex_source);
+    const GLuint fragment_shader = compileShader(GL_FRAGMENT_SHADER, fragment_source);
+    if (vertex_shader == 0 || fragment_shader == 0) {
+      glDeleteShader(vertex_shader);
+      glDeleteShader(fragment_shader);
+      return false;
+    }
+
+    waiting_program_ = glCreateProgram();
+    glAttachShader(waiting_program_, vertex_shader);
+    glAttachShader(waiting_program_, fragment_shader);
+    glLinkProgram(waiting_program_);
+    glDeleteShader(vertex_shader);
+    glDeleteShader(fragment_shader);
+
+    GLint linked = GL_FALSE;
+    glGetProgramiv(waiting_program_, GL_LINK_STATUS, &linked);
+    if (linked != GL_TRUE) {
+      LOGE("waiting shader link failed");
+      glDeleteProgram(waiting_program_);
+      waiting_program_ = 0;
+      return false;
+    }
+    waiting_viewport_uniform_ = glGetUniformLocation(waiting_program_, "u_viewport");
     return true;
   }
 
@@ -976,6 +1019,17 @@ void main() {
     glUseProgram(0);
   }
 
+  void drawWaitingOverlay() {
+    glDisable(GL_DEPTH_TEST);
+    glUseProgram(waiting_program_);
+    glUniform2f(
+        waiting_viewport_uniform_,
+        static_cast<float>(std::max(1, current_viewport_width_)),
+        static_cast<float>(std::max(1, current_viewport_height_)));
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glUseProgram(0);
+  }
+
   void cleanup() {
     {
       std::lock_guard<std::mutex> lock(g_surface_mutex);
@@ -1012,6 +1066,10 @@ void main() {
     if (external_video_program_ != 0) {
       glDeleteProgram(external_video_program_);
       external_video_program_ = 0;
+    }
+    if (waiting_program_ != 0) {
+      glDeleteProgram(waiting_program_);
+      waiting_program_ = 0;
     }
     if (video_program_ != 0) {
       glDeleteProgram(video_program_);
@@ -1189,6 +1247,10 @@ void main() {
   std::array<GLuint, 2> video_textures_{0, 0};
   GLuint external_video_program_ = 0;
   GLint external_video_texture_uniform_ = -1;
+  GLuint waiting_program_ = 0;
+  GLint waiting_viewport_uniform_ = -1;
+  int32_t current_viewport_width_ = 1;
+  int32_t current_viewport_height_ = 1;
   std::array<GLuint, 2> codec_textures_{0, 0};
   std::array<std::uint32_t, 2> uploaded_video_frame_{UINT32_MAX, UINT32_MAX};
   int64_t color_format_ = 0;

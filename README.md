@@ -46,3 +46,20 @@ gradle assembleDebug
 ```
 
 The initial APK is a transport bring-up client. It opens a regular Android Activity on Quest and sends `HELLO`/`HEARTBEAT` packets to the Ubuntu host. Native OpenXR rendering is the next milestone after this loop is verified.
+
+## ToolHang Quest teleop
+
+Use the fixed launcher instead of hand-building the long command:
+
+```bash
+tools/run_tool_hang_quest.sh
+```
+
+The launcher configures `adb reverse tcp:7777 tcp:7777` and starts ToolHang with H.264 stereo video, head tracking, and right-controller arm teleop.
+
+Controls:
+
+- `A` or `X`: reset the headset neutral frame. Head camera motion and arm motion share this frame.
+- Right squeeze: hold to clutch and move the arm.
+- Right trigger: press once to toggle gripper open/closed.
+- `B` or `Y`: reset the arm clutch neutral while keeping the shared headset frame.

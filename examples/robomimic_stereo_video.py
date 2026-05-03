@@ -690,12 +690,31 @@ def rotate_axis_angle(vector: np.ndarray, axis: np.ndarray, angle: float) -> np.
     )
 
 
+class QuestNeutralFrame:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._right = np.asarray([1.0, 0.0, 0.0], dtype=float)
+        self._up = np.asarray([0.0, 1.0, 0.0], dtype=float)
+        self._forward = np.asarray([0.0, 0.0, -1.0], dtype=float)
+
+    def set_axes(self, right: np.ndarray, up: np.ndarray, forward: np.ndarray) -> None:
+        with self._lock:
+            self._right = right.copy()
+            self._up = up.copy()
+            self._forward = forward.copy()
+
+    def axes(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        with self._lock:
+            return self._right.copy(), self._up.copy(), self._forward.copy()
+
+
 class QuestArmTeleop:
     POSITION_VALID_BIT = 0x2
 
-    def __init__(self, args: argparse.Namespace, latest_input: LatestQuestInput):
+    def __init__(self, args: argparse.Namespace, latest_input: LatestQuestInput, neutral_frame: QuestNeutralFrame):
         self.args = args
         self.latest_input = latest_input
+        self.neutral_frame = neutral_frame
         self.prev_grip_position: np.ndarray | None = None
         self.prev_grip_quat: np.ndarray | None = None
         self.was_clutched = False
@@ -764,22 +783,39 @@ class QuestArmTeleop:
         quest_rotvec = quat_to_rotvec_xyzw(quest_rot_delta)
         if np.linalg.norm(quest_rotvec) < self.args.arm_rotation_deadband_rad:
             quest_rotvec.fill(0.0)
+        neutral_right, neutral_up, neutral_forward = self.neutral_frame.axes()
+        local_delta = np.asarray(
+            [
+                np.dot(quest_delta, neutral_right),
+                np.dot(quest_delta, neutral_up),
+                np.dot(quest_delta, neutral_forward),
+            ],
+            dtype=float,
+        )
+        local_rotvec = np.asarray(
+            [
+                np.dot(quest_rotvec, neutral_right),
+                np.dot(quest_rotvec, neutral_up),
+                np.dot(quest_rotvec, neutral_forward),
+            ],
+            dtype=float,
+        )
 
-        # Quest tracking axes: +x right, +y up, -z forward. Panda base axes in
+        # Headset-neutral axes: +right, +up, +forward. Panda base axes in
         # robosuite: +x forward, +y left, +z up.
         dpos = np.asarray(
             [
-                -quest_delta[2] * self.args.arm_forward_sign,
-                -quest_delta[0] * self.args.arm_right_sign,
-                quest_delta[1] * self.args.arm_up_sign,
+                local_delta[2] * self.args.arm_forward_sign,
+                -local_delta[0] * self.args.arm_right_sign,
+                local_delta[1] * self.args.arm_up_sign,
             ],
             dtype=float,
         )
         drot = np.asarray(
             [
-                -quest_rotvec[2] * self.args.arm_forward_sign,
-                -quest_rotvec[0] * self.args.arm_right_sign,
-                quest_rotvec[1] * self.args.arm_up_sign,
+                local_rotvec[2] * self.args.arm_forward_sign,
+                -local_rotvec[0] * self.args.arm_right_sign,
+                local_rotvec[1] * self.args.arm_up_sign,
             ],
             dtype=float,
         )
@@ -1031,6 +1067,7 @@ class RobosuiteStereoSource:
         left_fov: tuple[float, float, float, float],
         right_fov: tuple[float, float, float, float],
         latest_head_pose: LatestHeadPose | None = None,
+        neutral_frame: QuestNeutralFrame | None = None,
     ):
         self.env = env
         self.stereo = stereo
@@ -1039,6 +1076,7 @@ class RobosuiteStereoSource:
         self.right_fov = right_fov
         self.frame_index = 0
         self.latest_head_pose = latest_head_pose
+        self.neutral_frame = neutral_frame
         self.center = np.asarray([args.center_x, args.center_y, args.center_z], dtype=float)
         self.base_target = np.asarray([args.target_x, args.target_y, args.target_z], dtype=float)
         self.up = np.asarray([0.0, 0.0, 1.0], dtype=float)
@@ -1050,6 +1088,9 @@ class RobosuiteStereoSource:
         self.base_up = self.base_up / max(np.linalg.norm(self.base_up), 1.0e-9)
         self.neutral_head_quat: np.ndarray | None = None
         self.neutral_head_position: np.ndarray | None = None
+        self.neutral_head_right: np.ndarray | None = None
+        self.neutral_head_up: np.ndarray | None = None
+        self.neutral_head_forward: np.ndarray | None = None
         self.filtered_yaw = 0.0
         self.filtered_pitch = 0.0
         self.filtered_center_offset = np.zeros(3, dtype=float)
@@ -1069,10 +1110,19 @@ class RobosuiteStereoSource:
         if self.neutral_head_quat is None or reset_pressed:
             self.neutral_head_quat = current
             self.neutral_head_position = current_position
+            self.neutral_head_right = quat_rotate_xyzw(current, np.asarray([1.0, 0.0, 0.0], dtype=float))
+            self.neutral_head_up = quat_rotate_xyzw(current, np.asarray([0.0, 1.0, 0.0], dtype=float))
+            self.neutral_head_forward = quat_rotate_xyzw(current, np.asarray([0.0, 0.0, -1.0], dtype=float))
+            if self.neutral_frame is not None:
+                self.neutral_frame.set_axes(
+                    self.neutral_head_right,
+                    self.neutral_head_up,
+                    self.neutral_head_forward,
+                )
             self.filtered_yaw = 0.0
             self.filtered_pitch = 0.0
             self.filtered_center_offset.fill(0.0)
-            print("head tracking neutral set")
+            print("head tracking neutral set from headset frame")
             return
 
         relative = quat_multiply_xyzw(quat_conjugate_xyzw(self.neutral_head_quat), current)
@@ -1092,6 +1142,20 @@ class RobosuiteStereoSource:
         direction = rotate_axis_angle(direction, pitch_axis, self.filtered_pitch)
 
         position_delta = current_position - self.neutral_head_position
+        if (
+            self.neutral_head_right is None
+            or self.neutral_head_up is None
+            or self.neutral_head_forward is None
+        ):
+            return
+        position_delta = np.asarray(
+            [
+                np.dot(position_delta, self.neutral_head_right),
+                np.dot(position_delta, self.neutral_head_up),
+                np.dot(position_delta, self.neutral_head_forward),
+            ],
+            dtype=float,
+        )
         position_norm = np.linalg.norm(position_delta)
         if position_norm < self.args.head_position_deadzone_m:
             position_delta = np.zeros(3, dtype=float)
@@ -1102,7 +1166,7 @@ class RobosuiteStereoSource:
                 / position_norm
             )
         center_offset = self.args.head_position_gain * (
-            -self.base_right * position_delta[0]
+            self.base_right * position_delta[0]
             + self.base_up * position_delta[1]
             + self.base_forward * position_delta[2]
         )
@@ -1229,9 +1293,14 @@ def run(args: argparse.Namespace) -> int:
         )
         print(f"projection_mode={args.projection_mode} left_fov={left_fov} right_fov={right_fov}")
 
+        neutral_frame = QuestNeutralFrame()
         latest_head_pose = LatestHeadPose() if args.head_tracking else None
         latest_quest_input = LatestQuestInput() if args.teleop_arm else None
-        arm_teleop = QuestArmTeleop(args, latest_quest_input) if latest_quest_input is not None else None
+        arm_teleop = (
+            QuestArmTeleop(args, latest_quest_input, neutral_frame)
+            if latest_quest_input is not None
+            else None
+        )
         source = RobosuiteStereoSource(
             env=env,
             stereo=stereo,
@@ -1239,6 +1308,7 @@ def run(args: argparse.Namespace) -> int:
             left_fov=left_fov,
             right_fov=right_fov,
             latest_head_pose=latest_head_pose,
+            neutral_frame=neutral_frame,
         )
         packetizer = StereoPacketizer(args)
         if args.head_tracking:
@@ -1415,8 +1485,8 @@ def main() -> int:
     parser.add_argument("--arm-osc-position-output-max", type=float, default=0.05)
     parser.add_argument("--arm-osc-rotation-output-max", type=float, default=0.5)
     parser.add_argument("--arm-max-action", type=float, default=1.0)
-    parser.add_argument("--arm-forward-sign", type=float, default=-1.0)
-    parser.add_argument("--arm-right-sign", type=float, default=-1.0)
+    parser.add_argument("--arm-forward-sign", type=float, default=1.0)
+    parser.add_argument("--arm-right-sign", type=float, default=1.0)
     parser.add_argument("--arm-up-sign", type=float, default=1.0)
     parser.add_argument("--arm-lock-rotation", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--arm-invert-gripper", action="store_true")

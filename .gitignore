@@ -1,0 +1,13 @@
+build/
+.gradle/
+local.properties
+*.iml
+__pycache__/
+*.py[cod]
+.cxx/
+quest_client/app/.cxx/
+quest_client/app/build/
+quest_client/build/
+quest_client/.gradle/
+quest_client/.idea/
+external/OpenXR-SDK-Source/.git/

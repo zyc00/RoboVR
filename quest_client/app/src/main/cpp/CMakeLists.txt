@@ -15,6 +15,7 @@ add_subdirectory(
 add_library(robovr_quest_client SHARED
   native_main.cpp
   openxr_app.cpp
+  transport.cpp
   video_decoder.cpp
   ${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c
 )

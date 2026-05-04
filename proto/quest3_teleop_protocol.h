@@ -1,8 +1,10 @@
 #pragma once
 
 #include <array>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
+#include <string>
 #include <string_view>
 
 namespace quest3_teleop {
@@ -66,6 +68,18 @@ inline std::array<std::uint8_t, kPacketHeaderSize> packHeader(const PacketHeader
   return bytes;
 }
 
+inline PacketHeader makePacketHeader(PacketType type,
+                                     std::uint64_t seq,
+                                     std::int64_t timestamp_ns,
+                                     std::size_t payload_size) {
+  PacketHeader header{};
+  header.type = static_cast<std::uint16_t>(type);
+  header.seq = seq;
+  header.timestamp_ns = timestamp_ns;
+  header.payload_size = static_cast<std::uint32_t>(payload_size);
+  return header;
+}
+
 inline PacketHeader unpackHeader(const std::uint8_t* data) {
   PacketHeader header{};
   std::memcpy(&header, data, sizeof(header));
@@ -120,6 +134,37 @@ inline bool isKnownPacketType(std::uint16_t type) {
       return true;
   }
   return false;
+}
+
+inline std::string_view findKeyValue(std::string_view payload, std::string_view key) {
+  std::size_t start = 0;
+  while (start < payload.size()) {
+    std::size_t end = payload.find_first_of(";\n", start);
+    const std::string_view field = payload.substr(
+        start, end == std::string_view::npos ? std::string_view::npos : end - start);
+    const std::size_t equal = field.find('=');
+    if (equal != std::string_view::npos && field.substr(0, equal) == key) {
+      return field.substr(equal + 1);
+    }
+    if (end == std::string_view::npos) {
+      break;
+    }
+    start = end + 1;
+  }
+  return {};
+}
+
+inline float parseFloatValue(std::string_view value, float fallback) {
+  if (value.empty()) {
+    return fallback;
+  }
+  std::string text(value);
+  char* end = nullptr;
+  const float parsed = std::strtof(text.c_str(), &end);
+  if (end == text.c_str()) {
+    return fallback;
+  }
+  return parsed;
 }
 
 }  // namespace quest3_teleop

@@ -134,12 +134,7 @@ bool TcpServer::send(PacketType type, std::string_view payload) {
   if (client_fd_ < 0) {
     return false;
   }
-  PacketHeader header{};
-  header.type = static_cast<std::uint16_t>(type);
-  header.seq = send_seq_.fetch_add(1);
-  header.timestamp_ns = monotonicTimeNs();
-  header.payload_size = static_cast<std::uint32_t>(payload.size());
-
+  const PacketHeader header = makePacketHeader(type, send_seq_.fetch_add(1), monotonicTimeNs(), payload.size());
   const auto header_bytes = packHeader(header);
   return writeExact(client_fd_, header_bytes.data(), header_bytes.size()) &&
          writeExact(client_fd_, payload.data(), payload.size());

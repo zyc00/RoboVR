@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robovr"
+version = "0.1.0"
+description = "Quest 3 raw input and streaming helpers for RoboVR"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "LicenseRef-Proprietary"
+authors = [
+  {name = "yuchen", email = "1185279688@qq.com"},
+]
+keywords = ["quest3", "vr", "teleoperation", "robotics", "robovr"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = ["numpy"]
+
+[project.urls]
+Homepage = "https://github.com/zyc00/RoboVR"
+Repository = "https://github.com/zyc00/RoboVR"
+Issues = "https://github.com/zyc00/RoboVR/issues"
+
+[tool.setuptools.packages.find]
+include = ["robovr*"]
+exclude = ["tests*", "examples*", "quest_client*", "host_bridge*", "proto*", "external*", "tools*", "docs*"]
+
+[tool.setuptools]
+include-package-data = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -7,6 +7,7 @@ Current milestone: bring up the wired development loop.
 - `host_bridge/`: Ubuntu C++ TCP bridge demo.
 - `proto/`: shared packet header and packet type definitions.
 - `quest_client/`: Android/Quest client skeleton.
+- `examples/quest_streaming.py`: shared Python protocol and H.264 streaming helpers.
 - `tools/`: ADB and local launch helpers.
 - `docs/`: design notes and test procedures.
 
@@ -63,3 +64,38 @@ Controls:
 - Right squeeze: hold to clutch and move the arm.
 - Right trigger: press once to toggle gripper open/closed.
 - `B` or `Y`: reset the arm clutch neutral while keeping the shared headset frame.
+
+## Quest 3 Raw Python API
+
+RoboInfra should consume the raw Quest input API from `robovr.quest3`. This API only exposes headset/controller state and connection stats; it does not own robot teleop mapping.
+
+```python
+from robovr.quest3 import Quest3Server
+
+server = Quest3Server(port=7777, adb_reverse=True)
+server.start()
+
+state = server.wait_for_state(timeout_s=5.0)
+while True:
+    state = server.latest()
+    if state is not None and state.connected:
+        head = state.head
+        right_grip = state.right_grip
+        trigger = state.right_trigger
+        squeeze = state.right_squeeze
+```
+
+Manual monitor:
+
+```bash
+python -m robovr.quest3.monitor --port 7777 --adb-reverse
+```
+
+## Python Package Publishing
+
+The PyPI package is scoped to the `robovr` Python package only. Quest APK/native
+client code and local build artifacts stay in the repository but are excluded
+from the wheel.
+
+See [docs/publishing.md](docs/publishing.md) for build, `twine check`, TestPyPI,
+and PyPI upload commands.

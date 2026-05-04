@@ -1,0 +1,17 @@
+include README.md
+include pyproject.toml
+recursive-include robovr *.py
+prune tests
+recursive-exclude * __pycache__
+recursive-exclude * *.py[cod]
+recursive-exclude .gradle *
+recursive-exclude build *
+recursive-exclude dist *
+recursive-exclude *.egg-info *
+recursive-exclude external *
+recursive-exclude quest_client/build *
+recursive-exclude quest_client/app/build *
+recursive-exclude quest_client/app/.cxx *
+recursive-exclude quest_client/.gradle *
+global-exclude *.apk
+global-exclude *.so

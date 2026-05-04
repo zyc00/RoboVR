@@ -10,14 +10,10 @@ from __future__ import annotations
 
 import argparse
 import os
-import queue
 import socket
-import struct
-import subprocess
 import sys
 import threading
 import time
-from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,24 +23,29 @@ from PIL import Image
 
 
 ROBOCORPUS_ROOT = Path(__file__).resolve().parents[2] / "RoboCorpus"
+ROBOVR_ROOT = Path(__file__).resolve().parents[1]
+if str(ROBOVR_ROOT) not in sys.path:
+    sys.path.insert(0, str(ROBOVR_ROOT))
 if ROBOCORPUS_ROOT.exists():
     sys.path.insert(0, str(ROBOCORPUS_ROOT))
 
-MAGIC = 0x50543351
-VERSION = 1
-PACKET_HEADER = struct.Struct("<IHHQqII")
-VIDEO_FRAME_HEADER = struct.Struct("<HHIQqIIII")
-
-PT_HELLO = 1
-PT_VIDEO = 3
-PT_POSE = 4
-PT_STATS = 5
-PT_HEARTBEAT = 6
-
-CODEC_RAW_RGBA = 1
-CODEC_H264_ANNEXB = 2
-VIDEO_FRAME_KEYFRAME = 1
-MAX_QUEST_PAYLOAD_BYTES = 1024 * 1024
+from quest_streaming import (
+    H264Encoder,
+    MAGIC,
+    MAX_QUEST_PAYLOAD_BYTES,
+    PACKET_HEADER,
+    PT_HEARTBEAT,
+    PT_HELLO,
+    PT_POSE,
+    PT_STATS,
+    PT_VIDEO,
+    VERSION,
+    make_h264_stereo_payload,
+    make_raw_stereo_payload,
+    parse_kv,
+    recvall,
+    send_packet,
+)
 
 QUEST_LEFT_FOV = (-0.942478, 0.698132, 0.767945, -0.959931)
 QUEST_RIGHT_FOV = (-0.698132, 0.942478, 0.767945, -0.959931)
@@ -145,401 +146,6 @@ class LatestQuestInput:
     def get(self) -> QuestInput | None:
         with self._lock:
             return self._input
-
-
-def monotonic_ns() -> int:
-    return time.monotonic_ns()
-
-
-def recvall(conn: socket.socket, size: int) -> bytes | None:
-    chunks = bytearray()
-    while len(chunks) < size:
-        data = conn.recv(size - len(chunks))
-        if not data:
-            return None
-        chunks.extend(data)
-    return bytes(chunks)
-
-
-def send_packet(conn: socket.socket, packet_type: int, seq: int, payload: bytes) -> None:
-    header = PACKET_HEADER.pack(
-        MAGIC,
-        VERSION,
-        packet_type,
-        seq,
-        monotonic_ns(),
-        len(payload),
-        0,
-    )
-    conn.sendall(header)
-    conn.sendall(payload)
-
-
-def start_code_size(data: bytes | bytearray, offset: int) -> int:
-    if offset + 3 <= len(data) and data[offset : offset + 3] == b"\x00\x00\x01":
-        return 3
-    if offset + 4 <= len(data) and data[offset : offset + 4] == b"\x00\x00\x00\x01":
-        return 4
-    return 0
-
-
-def find_start_code(data: bytes | bytearray, offset: int = 0) -> int:
-    for i in range(offset, max(offset, len(data) - 2)):
-        if start_code_size(data, i):
-            return i
-    return -1
-
-
-def nal_payload(nal: bytes) -> bytes:
-    sc_size = start_code_size(nal, 0)
-    return nal[sc_size:] if sc_size else nal
-
-
-def rbsp_from_ebsp(ebsp: bytes) -> bytes:
-    out = bytearray()
-    zeros = 0
-    for byte in ebsp:
-        if zeros >= 2 and byte == 0x03:
-            zeros = 0
-            continue
-        out.append(byte)
-        if byte == 0:
-            zeros += 1
-        else:
-            zeros = 0
-    return bytes(out)
-
-
-class BitReader:
-    def __init__(self, data: bytes):
-        self.data = data
-        self.bit_pos = 0
-
-    def read_bit(self) -> int:
-        if self.bit_pos >= len(self.data) * 8:
-            raise EOFError
-        byte = self.data[self.bit_pos // 8]
-        bit = (byte >> (7 - (self.bit_pos % 8))) & 1
-        self.bit_pos += 1
-        return bit
-
-    def read_bits(self, count: int) -> int:
-        value = 0
-        for _ in range(count):
-            value = (value << 1) | self.read_bit()
-        return value
-
-    def read_ue(self) -> int:
-        zeros = 0
-        while self.read_bit() == 0:
-            zeros += 1
-        if zeros == 0:
-            return 0
-        return (1 << zeros) - 1 + self.read_bits(zeros)
-
-
-def first_mb_in_slice(nal: bytes) -> int | None:
-    payload = nal_payload(nal)
-    if len(payload) < 2:
-        return None
-    rbsp = rbsp_from_ebsp(payload[1:])
-    try:
-        return BitReader(rbsp).read_ue()
-    except EOFError:
-        return None
-
-
-def h264_gop_frames(fps: float, override: int) -> int:
-    if override > 0:
-        return override
-    return max(1, int(round(fps)))
-
-
-def build_h264_ffmpeg_command(
-    *,
-    width: int,
-    height: int,
-    fps: float,
-    encoder: str,
-    bitrate: str,
-    gop: int,
-    vaapi_device: str,
-) -> list[str]:
-    fps_text = f"{fps:.3f}"
-    command = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-    ]
-    if encoder == "h264_vaapi":
-        command += ["-init_hw_device", f"vaapi=va:{vaapi_device}", "-filter_hw_device", "va"]
-    command += [
-        "-f",
-        "rawvideo",
-        "-pix_fmt",
-        "rgb24",
-        "-s:v",
-        f"{width}x{height}",
-        "-r",
-        fps_text,
-        "-i",
-        "pipe:0",
-        "-an",
-    ]
-    if encoder == "libx264":
-        command += [
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-tune",
-            "zerolatency",
-            "-pix_fmt",
-            "yuv420p",
-            "-g",
-            str(gop),
-            "-keyint_min",
-            str(gop),
-            "-bf",
-            "0",
-            "-x264-params",
-            "repeat-headers=1:scenecut=0",
-        ]
-    elif encoder == "h264_nvenc":
-        command += [
-            "-c:v",
-            "h264_nvenc",
-            "-preset",
-            "p1",
-            "-tune",
-            "ull",
-            "-profile:v",
-            "baseline",
-            "-rc",
-            "cbr",
-            "-b:v",
-            bitrate,
-            "-maxrate",
-            bitrate,
-            "-bufsize",
-            bitrate,
-            "-g",
-            str(gop),
-            "-bf",
-            "0",
-            "-forced-idr",
-            "1",
-            "-zerolatency",
-            "1",
-            "-aud",
-            "1",
-        ]
-    elif encoder == "h264_vaapi":
-        command += [
-            "-vf",
-            "format=nv12,hwupload",
-            "-c:v",
-            "h264_vaapi",
-            "-profile:v",
-            "constrained_baseline",
-            "-b:v",
-            bitrate,
-            "-maxrate",
-            bitrate,
-            "-bufsize",
-            bitrate,
-            "-g",
-            str(gop),
-            "-bf",
-            "0",
-        ]
-    elif encoder == "h264_qsv":
-        command += [
-            "-vf",
-            "format=nv12",
-            "-c:v",
-            "h264_qsv",
-            "-preset",
-            "veryfast",
-            "-look_ahead",
-            "0",
-            "-b:v",
-            bitrate,
-            "-maxrate",
-            bitrate,
-            "-bufsize",
-            bitrate,
-            "-g",
-            str(gop),
-            "-bf",
-            "0",
-        ]
-    elif encoder == "h264_v4l2m2m":
-        command += [
-            "-vf",
-            "format=nv12",
-            "-c:v",
-            "h264_v4l2m2m",
-            "-b:v",
-            bitrate,
-            "-g",
-            str(gop),
-            "-bf",
-            "0",
-        ]
-    else:
-        raise ValueError(f"unsupported H.264 encoder: {encoder}")
-    command += ["-f", "h264", "pipe:1"]
-    return command
-
-
-class H264Encoder:
-    def __init__(
-        self,
-        *,
-        width: int,
-        height: int,
-        fps: float,
-        label: str,
-        encoder: str,
-        bitrate: str,
-        gop: int,
-        vaapi_device: str,
-    ):
-        self.width = int(width)
-        self.height = int(height)
-        self.label = label
-        self.encoder = encoder
-        command = build_h264_ffmpeg_command(
-            width=self.width,
-            height=self.height,
-            fps=fps,
-            encoder=encoder,
-            bitrate=bitrate,
-            gop=h264_gop_frames(fps, gop),
-            vaapi_device=vaapi_device,
-        )
-        self.process = subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            bufsize=0,
-        )
-        self._queue: queue.Queue[tuple[int, bytes]] = queue.Queue()
-        self._stop = threading.Event()
-        self._current_nals: list[bytes] = []
-        self._current_has_vcl = False
-        self._frame_index = 0
-        self._stderr_tail: deque[str] = deque(maxlen=20)
-        self._reader = threading.Thread(target=self._reader_loop, daemon=True)
-        self._stderr_reader = threading.Thread(target=self._stderr_loop, daemon=True)
-        self._reader.start()
-        self._stderr_reader.start()
-
-    def close(self) -> None:
-        self._stop.set()
-        if self.process.stdin:
-            try:
-                self.process.stdin.close()
-            except BrokenPipeError:
-                pass
-        try:
-            self.process.wait(timeout=1.0)
-        except subprocess.TimeoutExpired:
-            self.process.kill()
-
-    def encode(self, rgb: np.ndarray) -> None:
-        if self.process.poll() is not None:
-            detail = " ".join(self._stderr_tail)
-            suffix = f": {detail}" if detail else ""
-            raise RuntimeError(
-                f"{self.label} {self.encoder} ffmpeg exited with code {self.process.returncode}{suffix}"
-            )
-        if self.process.stdin is None:
-            raise RuntimeError(f"{self.label} ffmpeg stdin is closed")
-        self.process.stdin.write(np.ascontiguousarray(rgb, dtype=np.uint8).tobytes())
-
-    def take(self, timeout: float = 0.25) -> tuple[int, bytes] | None:
-        try:
-            return self._queue.get(timeout=timeout)
-        except queue.Empty:
-            return None
-
-    def _emit_current(self) -> None:
-        if not self._current_nals or not self._current_has_vcl:
-            self._current_nals.clear()
-            self._current_has_vcl = False
-            return
-        payload = b"".join(self._current_nals)
-        self._queue.put((self._frame_index, payload))
-        self._frame_index += 1
-        self._current_nals = []
-        self._current_has_vcl = False
-
-    def _process_nal(self, nal: bytes) -> None:
-        sc_size = start_code_size(nal, 0)
-        if not sc_size or len(nal) <= sc_size:
-            return
-        nal_type = nal[sc_size] & 0x1F
-        is_vcl = 1 <= nal_type <= 5
-        starts_new_au = nal_type == 9
-        if is_vcl:
-            first_mb = first_mb_in_slice(nal)
-            starts_new_au = first_mb == 0
-        if starts_new_au and self._current_has_vcl:
-            self._emit_current()
-        self._current_nals.append(nal)
-        if is_vcl:
-            self._current_has_vcl = True
-
-    def _reader_loop(self) -> None:
-        if self.process.stdout is None:
-            return
-        buffer = bytearray()
-        while not self._stop.is_set():
-            chunk = self.process.stdout.read(4096)
-            if not chunk:
-                break
-            buffer.extend(chunk)
-            while True:
-                first = find_start_code(buffer, 0)
-                if first < 0:
-                    buffer.clear()
-                    break
-                if first > 0:
-                    del buffer[:first]
-                second = find_start_code(buffer, start_code_size(buffer, 0))
-                if second < 0:
-                    break
-                nal = bytes(buffer[:second])
-                del buffer[:second]
-                self._process_nal(nal)
-        if buffer:
-            self._process_nal(bytes(buffer))
-        self._emit_current()
-
-    def _stderr_loop(self) -> None:
-        if self.process.stderr is None:
-            return
-        while not self._stop.is_set():
-            line = self.process.stderr.readline()
-            if not line:
-                break
-            text = line.decode("utf-8", errors="replace").strip()
-            if text:
-                self._stderr_tail.append(text)
-
-
-def parse_kv(payload: bytes) -> dict[str, str]:
-    text = payload.decode("utf-8", errors="replace")
-    out: dict[str, str] = {}
-    for field in text.split(";"):
-        if "=" in field:
-            key, value = field.split("=", 1)
-            out[key] = value
-    return out
 
 
 def reader_loop(
@@ -911,65 +517,6 @@ def render_asymmetric_eye(
     return np.asarray(rgb[::-1]).copy()
 
 
-def make_raw_stereo_payload(
-    *,
-    frame_index: int,
-    width: int,
-    height: int,
-    left_rgb: np.ndarray,
-    right_rgb: np.ndarray,
-    swap_eyes: bool = False,
-    flip_y: bool = True,
-) -> bytes:
-    if swap_eyes:
-        left_rgb, right_rgb = right_rgb, left_rgb
-    if flip_y:
-        left_rgb = left_rgb[::-1]
-        right_rgb = right_rgb[::-1]
-    left = rgb_to_rgba_bytes(left_rgb)
-    right = rgb_to_rgba_bytes(right_rgb)
-    video_header = VIDEO_FRAME_HEADER.pack(
-        CODEC_RAW_RGBA,
-        VIDEO_FRAME_KEYFRAME,
-        0,
-        frame_index,
-        monotonic_ns(),
-        width,
-        height,
-        len(left),
-        len(right),
-    )
-    payload = video_header + left + right
-    if len(payload) > MAX_QUEST_PAYLOAD_BYTES:
-        raise ValueError(
-            f"raw stereo payload is {len(payload)} bytes; current Quest guard is "
-            f"{MAX_QUEST_PAYLOAD_BYTES}. Lower --width/--height or add H.264 encoding."
-        )
-    return payload
-
-
-def make_h264_stereo_payload(
-    *,
-    frame_index: int,
-    width: int,
-    height: int,
-    left_h264: bytes,
-    right_h264: bytes,
-) -> bytes:
-    video_header = VIDEO_FRAME_HEADER.pack(
-        CODEC_H264_ANNEXB,
-        VIDEO_FRAME_KEYFRAME,
-        0,
-        frame_index,
-        monotonic_ns(),
-        width,
-        height,
-        len(left_h264),
-        len(right_h264),
-    )
-    return video_header + left_h264 + right_h264
-
-
 class StereoPacketizer:
     def __init__(self, args: argparse.Namespace):
         self.args = args
@@ -1010,15 +557,23 @@ class StereoPacketizer:
         left_rgb = frame.left
         right_rgb = frame.right
         if self.args.codec == "raw":
+            if self.args.swap_eyes:
+                left_rgb, right_rgb = right_rgb, left_rgb
+            if not self.args.no_flip_y:
+                left_rgb = left_rgb[::-1]
+                right_rgb = right_rgb[::-1]
             payload = make_raw_stereo_payload(
                 frame_index=frame.frame_index,
                 width=self.args.width,
                 height=self.args.height,
-                left_rgb=left_rgb,
-                right_rgb=right_rgb,
-                swap_eyes=self.args.swap_eyes,
-                flip_y=not self.args.no_flip_y,
+                left=rgb_to_rgba_bytes(left_rgb),
+                right=rgb_to_rgba_bytes(right_rgb),
             )
+            if len(payload) > MAX_QUEST_PAYLOAD_BYTES:
+                raise ValueError(
+                    f"raw stereo payload is {len(payload)} bytes; current Quest guard is "
+                    f"{MAX_QUEST_PAYLOAD_BYTES}. Lower --width/--height or add H.264 encoding."
+                )
             return payload, f"raw stereo frame={frame.frame_index}"
 
         if self.args.swap_eyes:

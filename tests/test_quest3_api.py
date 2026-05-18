@@ -5,7 +5,7 @@ import socket
 
 import numpy as np
 
-from robovr.quest3 import Pose3D, Quest3InputState, Quest3Server, parse_key_value_payload
+from robovr.quest3 import Pose3D, Quest3InputState, Quest3Server, Quest3VideoStreamer, parse_key_value_payload
 from robovr.quest3.protocol import (
     MAGIC,
     VERSION,
@@ -78,12 +78,25 @@ class Quest3ApiTest(unittest.TestCase):
         self.assertFalse(state.connected)
 
     def test_packaging_smoke_import_and_construct(self) -> None:
-        from robovr.quest3 import Pose3D, Quest3InputState, Quest3Server
+        from robovr.quest3 import Pose3D, Quest3InputState, Quest3Server, Quest3VideoStreamer
 
         self.assertIsNotNone(Pose3D)
         self.assertIsNotNone(Quest3InputState)
         server = Quest3Server(auto_start=False)
         self.assertFalse(server.is_connected())
+        streamer = Quest3VideoStreamer(server)
+        self.assertFalse(streamer.is_connected)
+
+    def test_video_streamer_noops_when_disconnected(self) -> None:
+        server = Quest3Server(auto_start=False)
+        streamer = Quest3VideoStreamer(server)
+        frame = np.zeros((450, 800, 3), dtype=np.uint8)
+        self.assertFalse(streamer.send(frame, frame))
+        stats = streamer.stats()
+        self.assertEqual(stats["frames_submitted"], 1)
+        self.assertEqual(stats["frames_dropped"], 1)
+        self.assertEqual(stats["frames_sent"], 0)
+        streamer.close()
 
     def test_server_receives_pose_packet(self) -> None:
         try:

@@ -70,10 +70,11 @@ Controls:
 RoboInfra should consume the raw Quest input API from `robovr.quest3`. This API only exposes headset/controller state and connection stats; it does not own robot teleop mapping.
 
 ```python
-from robovr.quest3 import Quest3Server
+from robovr.quest3 import Quest3Server, Quest3VideoStreamer
 
 server = Quest3Server(port=7777, adb_reverse=True)
 server.start()
+streamer = Quest3VideoStreamer(server)
 
 state = server.wait_for_state(timeout_s=5.0)
 while True:
@@ -83,7 +84,15 @@ while True:
         right_grip = state.right_grip
         trigger = state.right_trigger
         squeeze = state.right_squeeze
+
+    # left_rgb and right_rgb are uint8 RGB arrays with shape H x W x 3.
+    streamer.send(left_rgb, right_rgb)
 ```
+
+`Quest3VideoStreamer` defaults to the validated Quest 3 stereo path: 800x450
+per eye, H.264, 72 FPS target, and RoboVR's internal flip/SurfaceTexture packet
+handling. If the Quest is not connected, `send()` returns `False` instead of
+raising.
 
 Manual monitor:
 

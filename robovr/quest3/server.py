@@ -18,9 +18,11 @@ from .protocol import (
     PT_HELLO,
     PT_POSE,
     PT_STATS,
+    PT_VIDEO,
     VERSION,
     parse_key_value_payload,
     recvall,
+    send_packet,
     unpack_packet_header,
 )
 from .state import Quest3InputState, empty_input_state, update_state_from_pose_payload
@@ -45,10 +47,12 @@ class Quest3Server:
 
         self._lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
+        self._send_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._server_socket: socket.socket | None = None
         self._conn: socket.socket | None = None
+        self._send_seq = 1
         self._latest: Quest3InputState | None = None
         self._stats: dict[str, Any] = {
             "packets": 0,
@@ -60,6 +64,8 @@ class Quest3Server:
             "error": 0,
             "disconnects": 0,
             "bad_packets": 0,
+            "video_packets_sent": 0,
+            "video_send_errors": 0,
             "last_error": None,
         }
         if auto_start:
@@ -104,8 +110,27 @@ class Quest3Server:
         with self._lock:
             return dict(self._stats)
 
-    def send_video_frame(self, *args: Any, **kwargs: Any) -> None:
-        raise NotImplementedError("Quest3Server does not implement video sending yet")
+    def send_payload(self, packet_type: int, payload: bytes) -> bool:
+        with self._send_lock:
+            conn = self._conn
+            if conn is None or not self.is_connected():
+                return False
+            seq = self._send_seq
+            self._send_seq += 1
+            try:
+                send_packet(conn, packet_type, seq, payload)
+            except OSError as exc:
+                self._bump("video_send_errors")
+                self._record_error(exc)
+                self._close_socket("_conn")
+                self._set_connected(False)
+                return False
+        if packet_type == PT_VIDEO:
+            self._bump("video_packets_sent")
+        return True
+
+    def send_video_frame(self, payload: bytes) -> bool:
+        return self.send_payload(PT_VIDEO, payload)
 
     def _run(self) -> None:
         try:

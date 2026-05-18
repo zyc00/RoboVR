@@ -15,6 +15,9 @@ from .server import Quest3Server
 
 
 def _start_code_size(data: bytes | bytearray, offset: int) -> int:
+    offset = int(offset)
+    if offset < 0:
+        return 0
     if offset + 3 <= len(data) and data[offset : offset + 3] == b"\x00\x00\x01":
         return 3
     if offset + 4 <= len(data) and data[offset : offset + 4] == b"\x00\x00\x00\x01":
@@ -23,6 +26,10 @@ def _start_code_size(data: bytes | bytearray, offset: int) -> int:
 
 
 def _find_start_code(data: bytes | bytearray, offset: int = 0) -> int:
+    # Keep the Quest video thread alive even if a caller passes args reversed.
+    if isinstance(data, int) and isinstance(offset, (bytes, bytearray)):
+        data, offset = offset, data
+    offset = int(offset)
     for i in range(offset, max(offset, len(data) - 2)):
         if _start_code_size(data, i):
             return i
